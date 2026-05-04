@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Annotation = {
   id: string;
@@ -16,6 +16,17 @@ type ArchiveAnnotations = {
   width: number;
   height: number;
   annotations: Annotation[];
+};
+
+type RecordEntry = {
+  id: number;
+  firstName: string;
+  lastName: string;
+  age: number | string;
+  buyer: string;
+  spouseId?: number;
+  fatherId?: number;
+  motherId?: number;
 };
 
 const MIN_ZOOM = 1;
@@ -69,6 +80,7 @@ export default function PdfViewer() {
   const [contentSize, setContentSize] = useState({ width: 0, height: 0 });
   const [archiveAnnotations, setArchiveAnnotations] = useState<ArchiveAnnotations | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [records, setRecords] = useState<RecordEntry[]>([]);
 
   useEffect(() => {
     let isDisposed = false;
@@ -97,6 +109,75 @@ export default function PdfViewer() {
       isDisposed = true;
     };
   }, []);
+
+  useEffect(() => {
+    let isDisposed = false;
+
+    const loadRecords = async () => {
+      try {
+        const response = await fetch("/records.json");
+        if (!response.ok) {
+          throw new Error(`Failed to load records.json (${response.status})`);
+        }
+        const data = (await response.json()) as RecordEntry[];
+        if (!isDisposed) {
+          setRecords(data);
+        }
+      } catch {
+        // Records are optional; the viewer still works without them.
+      }
+    };
+
+    void loadRecords();
+
+    return () => {
+      isDisposed = true;
+    };
+  }, []);
+
+  const recordsById = useMemo(() => {
+    const map = new Map<number, RecordEntry>();
+    for (const record of records) {
+      map.set(record.id, record);
+    }
+    return map;
+  }, [records]);
+
+  const childrenByParentId = useMemo(() => {
+    const map = new Map<number, RecordEntry[]>();
+    for (const record of records) {
+      for (const parentId of [record.fatherId, record.motherId]) {
+        if (parentId === undefined) continue;
+        const list = map.get(parentId) ?? [];
+        list.push(record);
+        map.set(parentId, list);
+      }
+    }
+    return map;
+  }, [records]);
+
+  const describeRelation = (relatedId: number | undefined) => {
+    if (relatedId === undefined) return null;
+    const related = recordsById.get(relatedId);
+    if (!related) return `id:${relatedId}`;
+    return `${related.firstName} (id:${related.id})`;
+  };
+
+  const buildFamilyStatus = (record: RecordEntry): string[] => {
+    const lines: string[] = [];
+    const spouse = describeRelation(record.spouseId);
+    if (spouse) lines.push(`Spouse: ${spouse}`);
+    const father = describeRelation(record.fatherId);
+    if (father) lines.push(`Father: ${father}`);
+    const mother = describeRelation(record.motherId);
+    if (mother) lines.push(`Mother: ${mother}`);
+    const children = childrenByParentId.get(record.id);
+    if (children && children.length > 0) {
+      const list = children.map((child) => `${child.firstName} (id:${child.id})`).join(", ");
+      lines.push(`Children: ${list}`);
+    }
+    return lines;
+  };
 
   useEffect(() => {
     const node = contentRef.current;
@@ -227,24 +308,81 @@ export default function PdfViewer() {
                 className="block select-none"
               />
 
-              {archiveAnnotations.annotations.map((annotation) => (
-                <div
-                  key={annotation.id}
-                  className="group absolute border border-transparent bg-transparent transition-colors duration-150 hover:border-[#9d2b25] hover:bg-[#c44b3d]/10"
-                  style={{
-                    left: annotation.x,
-                    top: annotation.y,
-                    width: annotation.width,
-                    height: annotation.height,
-                  }}
-                  title={annotation.name}
-                  aria-label={annotation.name}
-                >
-                  <span className="pointer-events-none absolute -top-6 left-0 hidden whitespace-nowrap rounded bg-[#9d2b25] px-1.5 py-0.5 text-[10px] font-medium text-[#fff7ef] shadow-sm group-hover:block group-focus-within:block">
-                    {annotation.name}
-                  </span>
-                </div>
-              ))}
+              {archiveAnnotations.annotations.map((annotation, index) => {
+                const record = records[index];
+                const POPUP_WIDTH = 256;
+                const POPUP_HEIGHT_ESTIMATE = 240;
+                const POPUP_GAP = 8;
+                const placeLeft =
+                  annotation.x + annotation.width + POPUP_GAP + POPUP_WIDTH >
+                  archiveAnnotations.width;
+                const placeAbove =
+                  annotation.y + POPUP_HEIGHT_ESTIMATE > archiveAnnotations.height;
+                const popupStyle: React.CSSProperties = {
+                  width: POPUP_WIDTH,
+                  ...(placeLeft
+                    ? { right: annotation.width + POPUP_GAP }
+                    : { left: annotation.width + POPUP_GAP }),
+                  ...(placeAbove
+                    ? { bottom: 0 }
+                    : { top: 0 }),
+                };
+                return (
+                  <div
+                    key={annotation.id}
+                    className="group absolute border border-transparent bg-transparent transition-colors duration-150 hover:border-[#9d2b25] hover:bg-[#c44b3d]/10"
+                    style={{
+                      left: annotation.x,
+                      top: annotation.y,
+                      width: annotation.width,
+                      height: annotation.height,
+                    }}
+                    aria-label={annotation.name}
+                  >
+                    <span className="pointer-events-none absolute -top-6 left-0 hidden whitespace-nowrap rounded bg-[#9d2b25] px-1.5 py-0.5 text-[10px] font-medium text-[#fff7ef] shadow-sm group-hover:block">
+                      {annotation.name}
+                    </span>
+                    {record && (
+                      <div
+                        className="pointer-events-none absolute z-10 hidden rounded-md border border-[#9d2b25] bg-[#fff7ef] p-3 text-left text-[12px] leading-snug text-[#16120f] shadow-lg group-hover:block"
+                        style={popupStyle}
+                      >
+                        <h2 className="mb-2 text-[13px] font-semibold tracking-tight">
+                          Record #{record.id}
+                        </h2>
+                        <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1">
+                          <dt className="font-medium text-[#6a5b4e]">ID</dt>
+                          <dd>{record.id}</dd>
+                          <dt className="font-medium text-[#6a5b4e]">First name</dt>
+                          <dd>{record.firstName || "—"}</dd>
+                          <dt className="font-medium text-[#6a5b4e]">Last name</dt>
+                          <dd>{record.lastName || "—"}</dd>
+                          <dt className="font-medium text-[#6a5b4e]">Family status</dt>
+                          <dd>
+                            {(() => {
+                              const lines = buildFamilyStatus(record);
+                              if (lines.length === 0) return "—";
+                              return (
+                                <div className="flex flex-col gap-0.5">
+                                  {lines.map((line) => (
+                                    <span key={line}>{line}</span>
+                                  ))}
+                                </div>
+                              );
+                            })()}
+                          </dd>
+                          <dt className="font-medium text-[#6a5b4e]">Age</dt>
+                          <dd>{record.age}</dd>
+                          <dt className="font-medium text-[#6a5b4e]">Location</dt>
+                          <dd>{annotation.name}</dd>
+                          <dt className="font-medium text-[#6a5b4e]">Buyer</dt>
+                          <dd>{record.buyer || "—"}</dd>
+                        </dl>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
